@@ -1,0 +1,21 @@
+.env
+__pycache__/
+.task_cache/
+.DS_Store
+*.pyc
+.venv/
+autocontrol.log
+run_stdout.log
+strengthen_stdout.log
+
+# LaTeX build artifacts
+manuscript/*.aux
+manuscript/*.bbl
+manuscript/*.blg
+manuscript/*.log
+manuscript/*.out
+manuscript/*.synctex.gz
+
+# Claude Code
+.claude/
+CLAUDE.md

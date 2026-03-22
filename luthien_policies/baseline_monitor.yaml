@@ -1,0 +1,11 @@
+# AutoRed Baseline Monitor — Luthien deployment config
+#
+# RECOMMENDED: This pattern-agnostic policy generalizes to unseen attacks.
+# AutoRed held-out results: 80% safety, 0.85 AUROC
+#
+# Place in your Luthien policy.yaml:
+policy:
+  class: "luthien_policies.baseline_monitor:BaselineMonitorPolicy"
+  config:
+    threshold: 0.5
+    judge_model: "claude-haiku-4-5-20251001"

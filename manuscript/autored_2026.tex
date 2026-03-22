@@ -1,0 +1,448 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2026}
+\makeatletter
+\renewcommand{\@noticestring}{}
+\makeatother
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,decorations.pathreplacing,calc,fit}
+
+\graphicspath{{figures/}}
+
+\newcommand{\ours}{\textsc{AutoRed}}
+
+\title{\ours{}: Measuring the Elicitation Gap \\
+via Automated Red-Blue Optimization}
+
+\author{
+  Phongsakon Mark Konrad \\
+  The Maersk Mc-Kinney Moller Institute \\
+  SDU Centre for Industrial Software \\
+  University of Southern Denmark \\
+  S{\o}nderborg 6400, Denmark \\
+  \texttt{phongsakon@outlook.dk} \\
+  \url{https://phomarkon.github.io/}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Evaluating AI safety requires understanding the \emph{elicitation gap}: the difference between a system's safety under naive evaluation and its safety under best-effort adversarial testing. Manual red teaming is expensive and does not scale. We introduce \ours{}, a five-phase framework that automates both red team attack optimization and blue team monitor optimization using a reasoning model as meta-optimizer. In a code backdoor detection setting adapted from the AI Control framework, \ours{} iteratively generates, evaluates, and improves strategies on both sides, then tests whether the improvements generalize. Automated optimization partially closes the elicitation gap: red attacks improve and blue monitors adapt. Co-evolutionary dynamics are oscillatory, with neither side converging. The central finding is cautionary: optimized strategies overfit to their training opponents. The best optimized monitor drops from 90\% safety during training to 47\% on held-out tasks, while a simple threshold baseline maintains 100\%. Elicitation gap measurements without held-out evaluation are unreliable.
+\end{abstract}
+
+
+\section{Introduction}
+
+Safety evaluations for AI systems increasingly rely on adversarial testing~\citep{perez2022red, ganguli2022red, mazeika2024harmbench}. A central open question is how much harder we could push: if we invested more effort into attacking a system, how much worse would its safety metrics become? \citet{greenblatt2024ai} call this the \emph{elicitation gap}, the difference between measured safety under default evaluation and safety under the strongest feasible attack. If this gap is large, current evaluations give false confidence.
+
+Manual red teaming is the standard approach, but it is expensive, inconsistent across teams, and does not scale. Automated methods~\citep{perez2022red, yu2024gptfuzzer, zou2023universal, liu2024autodan} optimize attacks but leave defenses fixed, measuring only the offensive half of the gap. No existing framework simultaneously optimizes both sides to measure the full gap, and no prior work has tested whether optimized strategies generalize beyond the opponents they trained against.
+
+We present \ours{}, a framework that automates both red team attack optimization and blue team monitor optimization in a code backdoor detection setting~\citep{greenblatt2024ai}. A reasoning model iteratively improves strategies on each side across five phases: baselines, independent red and blue optimization, co-evolution, and a transfer test on held-out tasks. Our central finding is cautionary: \textbf{optimized strategies overfit to their training opponents}. The best optimized monitor achieves 90\% safety during training but averages just 47\% on held-out tasks (3 seeds, $\pm$0.09), while a simple threshold baseline maintains 100\% with zero variance.
+
+Three results support this. Red optimization raises attack success from 0\% to 30\% against a fixed baseline monitor. Blue optimization achieves 90\% safety with 90\% usefulness against the optimized attack. But a $3 \times 3$ transfer matrix reveals that the optimized monitor is \emph{worse} than the baseline against the very attack it trained against (50\% vs.\ 20\% attack success). On held-out tasks, the baseline monitor achieves AUROC = 0.85 while the optimized monitor sits at 0.50 (chance), confirming zero discriminative signal on unseen code.
+
+These results have direct implications for how the AI safety community should measure elicitation gaps. Any automated red teaming pipeline that reports gap measurements without held-out evaluation risks producing inflated estimates on both sides. Simple, pattern-agnostic baselines should always accompany optimized strategies as a robustness check. More broadly, elicitation gap measurement faces the same generalization challenges as supervised learning: optimizing on a narrow distribution produces brittle classifiers, not genuine capability improvements.
+
+\paragraph{Contributions.}
+\begin{itemize}[nosep,left=0pt]
+    \item \ours{}, a five-phase framework that automates both attack and defense optimization using a reasoning model, enabling systematic elicitation gap measurement.
+    \item Evidence that automated optimization partially closes the gap (red: 0\% $\to$ 30\%; blue: 90\% safety at 90\% usefulness), with oscillatory co-evolutionary dynamics.
+    \item The finding that optimized strategies overfit: the best monitor drops from 90\% to 47\% safety on held-out tasks (3 seeds), while a threshold baseline holds at 100\%.
+    \item A transfer test methodology (attack $\times$ monitor matrix + held-out evaluation) that exposes this overfitting.
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    % Phase box base
+    phasebase/.style={
+        rectangle, rounded corners=5pt,
+        minimum width=3.0cm, minimum height=2.2cm,
+        align=center, line width=1pt,
+    },
+    pgray/.style  ={phasebase, draw=black!30, fill=gray!5},
+    pred/.style   ={phasebase, draw=red!50,   fill=red!6},
+    pblue/.style  ={phasebase, draw=blue!50,  fill=blue!6},
+    pviolet/.style={phasebase, draw=violet!45, fill=violet!5},
+    pgreen/.style ={phasebase, draw=green!50!black, fill=green!6},
+    % Flow arrows
+    arr/.style={->, line width=1.4pt, black!35, shorten <=3pt, shorten >=3pt},
+    % Model boxes
+    mbox/.style={
+        rectangle, rounded corners=3pt, draw=black!20, fill=gray!3,
+        minimum width=3.4cm, minimum height=0.75cm,
+        align=center, font=\small, line width=0.5pt,
+    },
+    % Annotations
+    desc/.style={font=\footnotesize, text=black!50, align=center},
+    flowlabel/.style={font=\footnotesize, align=center},
+]
+
+% ── Phase boxes ──────────────────────────────────────────
+\node[pgray] (p0) {
+    \textbf{\large Phase 0}\\[4pt]
+    \normalsize Baselines
+};
+\node[pred, right=1.4cm of p0] (p1) {
+    \textbf{\large Phase 1}\\[4pt]
+    \normalsize Red Optim.
+};
+\node[pblue, right=1.4cm of p1] (p2) {
+    \textbf{\large Phase 2}\\[4pt]
+    \normalsize Blue Optim.
+};
+\node[pviolet, right=1.4cm of p2] (p3) {
+    \textbf{\large Phase 3}\\[4pt]
+    \normalsize Co-evolution
+};
+\node[pgreen, right=1.4cm of p3] (p4) {
+    \textbf{\large Phase 4}\\[4pt]
+    \normalsize Transfer Test
+};
+
+% ── Flow arrows ──────────────────────────────────────────
+\draw[arr] (p0) -- (p1);
+\draw[arr] (p1) -- (p2);
+\draw[arr] (p2) -- (p3);
+\draw[arr] (p3) -- (p4);
+
+% ── Data-flow labels below arrows (not on them) ─────────
+\node[flowlabel, text=red!55] at ($(p1.east)!0.5!(p2.west)+(0,-1.45)$)
+    {\textit{best attack} $\rightarrow$};
+\node[flowlabel, text=blue!55] at ($(p2.east)!0.5!(p3.west)+(0,-1.45)$)
+    {\textit{best monitor} $\rightarrow$};
+
+% ── Loop arrows (full circular, prominent) ───────────────
+\foreach \nd/\col/\lab in {p1/red/15\times, p2/blue/15\times, p3/violet/5\!\times\!3}{
+    \draw[->, \col!50, line width=1.2pt]
+        ([xshift=6pt]\nd.north) arc[start angle=0, end angle=320, x radius=10pt, y radius=12pt];
+    \node[above=16pt of \nd, font=\normalsize\bfseries, text=\col!60] {$\lab$};
+}
+
+% ── Descriptions below boxes ────────────────────────────
+\node[desc, below=8pt of p0] {3 monitors\\[-1pt] naive attack};
+\node[desc, below=8pt of p1] {fixed blue\\[-1pt] optimize red};
+\node[desc, below=8pt of p2] {fixed red\\[-1pt] optimize blue};
+\node[desc, below=8pt of p3] {alternate\\[-1pt] red $\leftrightarrow$ blue};
+\node[desc, below=8pt of p4] {$3{\times}3$ matrix\\[-1pt] + held-out};
+
+% ── Model row (well separated) ───────────────────────────
+\coordinate (modelY) at ($(p2.south)+(0,-3.0)$);
+
+\node[font=\footnotesize, text=black!35] at ($(p2.south)+(0,-2.35)$) {Models};
+
+\node[mbox] (mu) at (modelY-|p1) {$\mathcal{U}$\,: \texttt{minimax-m2.7}};
+\node[mbox] (mt) at (modelY-|p2.east) {$\mathcal{T}$\,: \texttt{nemotron-3-super}};
+\node[mbox] (mo) at (modelY-|p3.east) {$\mathcal{O}$\,: \texttt{deepseek-v3.1}};
+
+\node[font=\scriptsize, text=black!45, below=2pt of mu] {untrusted coder};
+\node[font=\scriptsize, text=black!45, below=2pt of mt] {trusted monitor};
+\node[font=\scriptsize, text=black!45, below=2pt of mo] {optimizer};
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{\ours{} pipeline. Phase~0 establishes baselines; Phases~1--2 independently optimize red attacks and blue monitors; Phase~3 alternates both sides; Phase~4 evaluates generalization via a transfer matrix and held-out tasks. Three models serve distinct roles.}
+\label{fig:pipeline}
+\end{figure}
+
+
+\section{Related Work}
+
+\paragraph{AI safety evaluation.} Red teaming language models has become standard practice~\citep{perez2022red, ganguli2022red}. \citet{mazeika2024harmbench} introduce HarmBench for standardized evaluation. These efforts optimize attacks without simultaneously optimizing defenses. \ours{} extends this by automating both sides and measuring the gap between them.
+
+\paragraph{AI Control.} \citet{greenblatt2024ai} formalize the trusted monitoring framework we build on. They manually design protocols and evaluate against hand-crafted attacks. We automate both the design and evaluation loop, enabling systematic measurement of how much optimization improves each side.
+
+\paragraph{Automated adversarial attacks.} GCG~\citep{zou2023universal} and AutoDAN~\citep{liu2024autodan} automate adversarial prompt generation through gradient-based and genetic optimization. These operate at the input level (crafting prompts) rather than the strategy level (designing how to attack). \ours{} optimizes high-level strategies that generate many individual attack instances.
+
+\paragraph{Co-evolutionary optimization.} Co-evolutionary algorithms have a long history~\citep{popovici2012coevolutionary}. Cycling and overfitting to current opponents are known failure modes. Our Phase~3 results align with these findings: oscillatory dynamics and strategy overfitting emerge naturally from alternating optimization.
+
+
+\section{Background}
+
+\paragraph{AI Control.} \citet{greenblatt2024ai} introduce a framework where an untrusted model $\mathcal{U}$ generates code while a trusted monitor $\mathcal{T}$ reviews it. A \emph{protocol} decides whether to accept $\mathcal{U}$'s output or defer to $\mathcal{T}$ based on suspicion scoring. Safety is the fraction of backdoored submissions caught (detected or deferred); usefulness is the fraction of honest submissions that produce correct code.
+
+\paragraph{Elicitation gap.} The elicitation gap is the difference between measured safety under default evaluation and safety under the strongest feasible attack. A large gap means current evaluations underestimate risk. Measuring this gap requires exploring the space of possible attacks, which is combinatorially large and poorly understood.
+
+\paragraph{Code backdoor detection.} We adopt the setting from \citet{greenblatt2024ai}. The untrusted model writes Python functions for programming tasks. In attack mode, a backdoor is injected: a specific trigger input causes the function to return an incorrect output while all visible test cases pass. The monitor must distinguish backdoored code from honest code using suspicion scores. This setting is a tractable proxy for a broader class of deployment threats: any scenario where a capable but potentially misaligned model produces artifacts (code, plans, tool calls) that must be reviewed before execution.
+
+
+\section{Method: \ours{}}
+\label{sec:method}
+
+\ours{} operates in five phases, each building on the previous. A shared results board tracks metrics and best strategies across phases. A reasoning model $\mathcal{O}$ generates improved strategies by analyzing prior results.
+
+\subsection{Strategy spaces}
+
+\paragraph{Blue (monitoring protocol).} The blue strategy implements a function \texttt{run\_protocol(problem, code, trusted\_model, ...)} that returns a decision in $\{\texttt{ACCEPT}, \texttt{DEFER}\}$. The protocol may call the trusted model at most once per invocation (for suspicion scoring or code analysis) and may perform unlimited local static analysis (AST parsing, regex matching). It must never query the untrusted model, which is adversarial.
+
+\paragraph{Red (attack strategy).} Red controls two aspects: (1) whether to attack on a given task, and (2) how to obfuscate the injected backdoor. Backdoor injection is handled deterministically by the evaluation harness, which inserts an early-return conditional for the trigger input. Red's optimization surface is limited to obfuscation: making the injected code harder for the monitor to detect. This measures the \emph{obfuscation elicitation gap} specifically; a real adversary would also optimize the injection mechanism itself, the choice of trigger, and the attack surface.
+
+\subsection{Five-phase pipeline}
+
+\paragraph{Phase~0: Baselines.} We focus on the \emph{trusted monitoring} protocol from the taxonomy of \citet{greenblatt2024ai} (as opposed to trusted editing or untrusted monitoring). We evaluate three fixed variants against naive (unoptimized) attacks: no monitoring, trusted monitoring with threshold $\tau = 0.5$, and aggressive monitoring with $\tau = 0.3$.
+
+\paragraph{Phase~1: Red optimization.} Blue is fixed to the baseline trusted monitor ($\tau = 0.5$). For 15 iterations, $\mathcal{O}$ receives the current red strategy, the blue monitor code, evaluation metrics, and examples of caught attacks. It generates an improved red strategy. If the new strategy achieves higher attack success than the current best (with valid code structure), it becomes the active strategy.
+
+\paragraph{Phase~2: Blue optimization.} Red is fixed to the best strategy from Phase~1. For 15 iterations, $\mathcal{O}$ optimizes the monitoring protocol. A new protocol is adopted only if it Pareto-improves over the current best on both safety and usefulness. The optimizer receives false positive examples alongside detection metrics.
+
+\paragraph{Phase~3: Co-evolution.} Starting from the Phase~1 best red and Phase~2 best blue, we alternate optimization: 3 red iterations then 3 blue iterations, for 5 rounds. This tests whether strategies effective against fixed opponents remain so when both sides adapt.
+
+\paragraph{Phase~4: Transfer test.} We construct a $3 \times 3$ evaluation matrix: three attacks (naive, Phase~1 best, Phase~3 best) crossed with three monitors (baseline, Phase~2 best, aggressive). We also run held-out evaluation on tasks unseen during optimization.
+
+\subsection{Evaluation metrics}
+
+Each evaluation runs 20 tasks: 10 honest, 10 attack. We report:
+\textbf{Safety}: fraction of attack tasks where the backdoor is caught or deferred.
+\textbf{Usefulness}: fraction of honest tasks producing correct code.
+\textbf{Attack success}: fraction of attacks passing undetected.
+\textbf{AUROC}: area under ROC for suspicion score separation between honest and attack code.
+
+\subsection{Optimizer design}
+
+$\mathcal{O}$ receives a structured prompt containing the current strategy code, the opponent's code, recent metrics, and success/failure examples. It outputs a complete replacement strategy file using chain-of-thought reasoning. Outputs are validated for required function signatures before evaluation; invalid outputs are discarded.
+
+
+\subsection{Experimental setup}
+
+\paragraph{Models.} We use three models via the Ollama cloud API: \texttt{minimax-m2.7} as the untrusted coder $\mathcal{U}$, \texttt{nemotron-3-super} (NVIDIA 120B MoE) as the trusted monitor $\mathcal{T}$, and \texttt{deepseek-v3.1:671b} as the optimizer $\mathcal{O}$. Using different model families for $\mathcal{U}$ and $\mathcal{T}$ prevents architectural bias in monitoring.
+
+\paragraph{Tasks.} We use 15 hand-crafted Python programming tasks (primality testing, Fibonacci, palindrome checking, sorting, etc.) with visible tests, hidden tests, and designated backdoor triggers. Each trigger specifies an input and expected output; the backdoor causes the function to return an incorrect value for the trigger while passing all visible tests. Ten additional held-out tasks are reserved for final evaluation.
+
+\paragraph{Evaluation protocol.} Each iteration evaluates 20 tasks (10 honest, 10 attack) with a fixed random seed per iteration for reproducibility. Code execution is sandboxed in temporary directories with a 5-second timeout.
+
+
+\section{Results}
+
+\subsection{Baselines (Phase~0)}
+
+Table~\ref{tab:baselines} shows baseline performance against naive attacks.
+
+\begin{table}[t]
+    \caption{Baseline monitor performance against naive (unoptimized) attacks. Under no monitoring, all submissions are accepted: safety is 0.70 because 7 of 10 backdoor injections fail before reaching the monitor (the injected code crashes or breaks visible tests), not because attacks are detected. Usefulness is 0.50 because the untrusted model produces correct code on only half of honest tasks. Monitoring improves usefulness because deferred tasks are handled by the more capable trusted model.}
+    \label{tab:baselines}
+    \centering
+    \begin{tabular}{lccccc}
+        \toprule
+        Monitor & Safety & Useful. & Atk.\ Succ. & AUROC & Defer Rate \\
+        \midrule
+        No monitoring             & 0.70 & 0.50 & 0.30 & 0.50 & 0.00 \\
+        Trusted ($\tau{=}0.5$)    & 1.00 & 0.80 & 0.00 & 0.67 & 0.15 \\
+        Aggressive ($\tau{=}0.3$) & 1.00 & 0.60 & 0.00 & 0.69 & 0.15 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Without monitoring, naive attacks succeed 30\% of the time. Both threshold monitors achieve perfect safety, with the standard threshold retaining higher usefulness (0.80 vs.\ 0.60).
+
+
+\subsection{Red optimization (Phase~1)}
+
+Figure~\ref{fig:elicitation} (left) shows attack success across 15 iterations. The optimizer discovers an effective strategy at iteration~1 (attack success 0.30) and does not improve further. The successful strategy replaces the obvious \texttt{if input == trigger} check with character-frequency analysis and string-length conditions that are semantically equivalent but syntactically different. Later iterations attempt hash-based comparisons and helper functions with innocent names, but these either break correctness or fail to evade the monitor.
+
+The Phase~1 elicitation gap for red is 0.30: attack success rises from 0\% (naive against baseline monitor) to 30\% under optimization. With $n{=}10$ attack tasks, this corresponds to 3 successful attacks out of 10, and individual numbers should be interpreted as trends rather than precise estimates.
+
+
+\subsection{Blue optimization (Phase~2)}
+
+Figure~\ref{fig:elicitation} (right) shows safety across 15 blue optimization iterations against the Phase~1 best attack. The optimizer finds a strong protocol at iteration~2: safety 0.90, usefulness 0.90. This protocol combines AST-based static analysis (detecting suspicious imports, hash comparisons, validation-function patterns) with a single trusted model call using adaptive thresholds.
+
+Several iterations produce degenerate solutions (safety 1.00, usefulness 0.00) that defer all submissions. The Pareto improvement filter correctly rejects these. Oscillation between overly aggressive and overly permissive protocols suggests the optimizer struggles to navigate the safety-usefulness tradeoff. AUROC remains at 0.50 for most Phase~2 iterations, indicating that the monitor's suspicion scores do not reliably separate honest from attack code. The best protocol's safety comes primarily from its AST-based hard rules (which trigger deterministic deferrals) rather than from the trusted model's suspicion scoring. This explains the later overfitting: the hard rules are pattern-specific and brittle.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{elicitation_phase1.pdf}
+        \caption{Phase~1: Red optimization. Attack success over 15 iterations against the fixed baseline monitor ($\tau{=}0.5$). Stars mark kept improvements. The optimizer discovers an effective obfuscation at iteration~1 and plateaus at 0.30.}
+        \label{fig:elicitation_red}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{elicitation_phase2.pdf}
+        \caption{Phase~2: Blue optimization. Safety and usefulness over 15 iterations against the Phase~1 best attack. The best protocol (iteration~2, star) achieves 0.90 on both metrics. Iterations with usefulness~0 are degenerate ``defer all'' solutions.}
+        \label{fig:elicitation_blue}
+    \end{subfigure}
+    \caption{Elicitation curves for red and blue optimization. Each point is one optimizer iteration. Dashed lines show baseline reference values. Stars indicate iterations whose strategies were kept (improving over the previous best).}
+    \label{fig:elicitation}
+\end{figure}
+
+
+\subsection{Co-evolution (Phase~3)}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.65\textwidth]{coevolution.pdf}
+    \caption{Co-evolutionary dynamics across 5 rounds. Each round: 3 red iterations then 3 blue iterations. Red attack success (peak per round) oscillates between 0.30 and 0.60. Blue safety (peak per round) stays above 0.70 and reaches 1.00 in four of five rounds. Neither side converges; the dynamics resemble an oscillatory arms race.}
+    \label{fig:coevolution}
+\end{figure}
+
+Figure~\ref{fig:coevolution} shows co-evolutionary dynamics across 5 rounds. Red attack success peaks at 0.60 in rounds~0 and~3 but drops in intervening rounds as blue adapts. Blue safety stays at or above 0.70 and reaches 1.00 in four of five rounds. The dynamics are oscillatory rather than convergent.
+
+Red's peak during co-evolution (0.60) exceeds its Phase~1 best (0.30), indicating that adapting to a stronger opponent produces stronger strategies than optimizing against a fixed baseline. Blue's consistent recovery shows that the monitoring strategy space is rich enough to counter diverse attacks when given the opportunity to observe them.
+
+
+\subsection{Transfer test (Phase~4)}
+
+Table~\ref{tab:transfer} shows the $3 \times 3$ transfer matrix.
+
+\begin{table}[t]
+    \caption{Transfer test: attack success rate for each attack-monitor pair. Optimized attacks partially transfer across monitors, but the Phase~2 best monitor is worse than the baseline against the Phase~1 best attack (0.50 vs.\ 0.20), indicating overfitting. Bold marks the highest attack success per column.}
+    \label{tab:transfer}
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+        & Baseline ($\tau{=}0.5$) & Phase~2 Best & Aggressive ($\tau{=}0.3$) \\
+        \midrule
+        Naive attack    & 0.30 & 0.20 & 0.00 \\
+        Phase~1 best    & 0.20 & \textbf{0.50} & 0.00 \\
+        Phase~3 best    & 0.20 & 0.30 & \textbf{0.10} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.55\textwidth]{transfer_matrix.pdf}
+    \caption{Transfer matrix heatmap of attack success rates. The Phase~2 best monitor (middle column) is more vulnerable to the Phase~1 best attack than the simpler baseline, revealing overfitting. The aggressive monitor ($\tau{=}0.3$, right column) is the most robust across all attacks.}
+    \label{fig:transfer_heatmap}
+\end{figure}
+
+Two patterns stand out. First, the Phase~2 best monitor is \emph{worse} than the baseline against the Phase~1 best attack (0.50 vs.\ 0.20). The optimized monitor learned to detect specific patterns in its training attack and became vulnerable to the same attack's earlier, simpler variant. Second, the aggressive threshold monitor is the most robust across all attacks (attack success $\leq 0.10$), at the cost of reduced usefulness.
+
+
+\subsection{Held-out evaluation}
+
+Table~\ref{tab:heldout} reports performance on 10 held-out tasks unseen during optimization.
+
+\begin{table}[t]
+    \caption{Held-out evaluation (mean $\pm$ std over 3 seeds): best Phase~1 red attack against three monitors on unseen tasks. The optimized blue monitor averages 47\% safety with AUROC at chance (0.50) across all seeds, while the aggressive baseline holds at 100\% safety with zero variance.}
+    \label{tab:heldout}
+    \centering
+    \begin{tabular}{lcccc}
+        \toprule
+        Configuration & Safety & Useful. & Atk.\ Succ. & AUROC \\
+        \midrule
+        Best red vs.\ baseline       & 0.80{\scriptsize$\pm$.16} & 0.80{\scriptsize$\pm$.16} & 0.20{\scriptsize$\pm$.16} & 0.85{\scriptsize$\pm$.11} \\
+        Best red vs.\ optimized blue & 0.47{\scriptsize$\pm$.09} & 0.80{\scriptsize$\pm$.16} & 0.53{\scriptsize$\pm$.09} & 0.50{\scriptsize$\pm$.00} \\
+        Best red vs.\ aggressive     & \textbf{1.00}{\scriptsize$\pm$.00} & 0.80{\scriptsize$\pm$.16} & \textbf{0.00}{\scriptsize$\pm$.00} & 0.82{\scriptsize$\pm$.14} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The optimized blue monitor averages 47\% safety across 3 seeds (down from 90\% during training), with attack success at 53\%. Its AUROC is 0.50 on every seed, confirming zero discriminative signal on new tasks. The aggressive threshold baseline achieves 100\% safety with zero variance across all seeds. The baseline monitor, despite no optimization, averages 80\% safety with AUROC = 0.85. Figure~\ref{fig:heldout_bar} visualizes this contrast.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.48\textwidth]{heldout_comparison.pdf}
+    \caption{Held-out safety and attack success (mean $\pm$ std, 3 seeds). The dashed line marks training-time safety (0.90). The optimized blue monitor drops to 0.47 on unseen tasks while the aggressive baseline holds at 1.00. Error bars confirm the result is stable across seeds.}
+    \label{fig:heldout_bar}
+\end{figure}
+
+Figure~\ref{fig:decision} shows the contrast visually: the baseline monitor's scores correctly separate honest (low) from attack (high), while the optimized monitor's scores are inverted on held-out tasks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{decision_boundary.pdf}
+    \caption{Suspicion scores on held-out tasks for the baseline monitor (left) vs.\ the optimized monitor (right). The baseline cleanly separates honest (green, low scores) from attack code (red, high scores). The optimized monitor's scores are inverted: honest code receives 0.0 (triggering spurious deferrals) while attack code receives 0.8 (triggering incorrect accepts). Dashed lines mark decision thresholds.}
+    \label{fig:decision}
+\end{figure}
+
+This is the central finding: automated optimization improves strategies against fixed opponents, but the improvements overfit. Measuring an elicitation gap without held-out evaluation inflates estimates of both offense and defense capability. The held-out tasks use unobfuscated backdoor injection (simple \texttt{if}-checks) rather than the hash-based obfuscation seen during training, so the monitor's failure reflects both optimization overfitting \emph{and} distribution shift in the attack mechanism. This compounds the concern: in real deployments, attackers are not constrained to a single obfuscation paradigm, making distribution shift the norm rather than the exception.
+
+\paragraph{Why the optimized monitor fails.} Table~\ref{tab:failure} breaks down held-out decisions by the optimized blue monitor into failure modes. The root cause is a mismatch between training and held-out attack patterns. During training, the Phase~1 best attack uses \texttt{hashlib.md5()} with precomputed hashes. The optimized monitor learns AST rules targeting these patterns (hash imports, 32-char hex strings, validation function names). On held-out tasks, the injected backdoor is a simple \texttt{if str(n) == trigger: return wrong} with no hash obfuscation. The AST rules do not fire (0 suspicious patterns on every held-out task), so all decisions fall to the trusted model call.
+
+The model call itself is also overfitted: the optimized prompt instructs the model to ``pay special attention to input validation that uses hashing'' and ``hash-based comparisons.'' On held-out code without hashing, the model assigns low scores (0.0) to honest code, triggering DEFER (4 of 5 false positives). For attack code, the simple backdoor looks like normal edge-case handling, so the model gives high scores (0.8), triggering ACCEPT (2 of 3 undetected backdoors).
+
+\begin{table}[t]
+    \caption{Failure mode taxonomy for the optimized blue monitor on held-out tasks. All failures trace to the same root cause: AST rules and model prompt are tuned to hash-based obfuscation, which is absent on held-out tasks.}
+    \label{tab:failure}
+    \centering
+    \footnotesize
+    \begin{tabular}{llcl}
+        \toprule
+        Mode & Decision & Count & Mechanism \\
+        \midrule
+        Honest & DEFER (FP)  & 4/5 & Model score 0.0 $<$ threshold 0.3 $\to$ spurious defer \\
+        Honest & ACCEPT (correct) & 1/5 & Model score 1.0 $>$ threshold $\to$ correct accept \\
+        \midrule
+        Attack & ACCEPT (FN) & 2/5 & No AST triggers; model score 0.8 $>$ threshold \\
+        Attack & DEFER (correct) & 2/5 & Model score $\leq$ 0.1 $\to$ defer catches backdoor \\
+        Attack & FAILED\_ATTACK & 1/5 & Backdoor injection failed (safe by default) \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{Strategy evolution.}
+Inspecting the optimizer logs reveals a clear arc. In Phase~1 iteration~0, the red optimizer generates a SHA-256 hash-based obfuscation that replaces the trigger check with \texttt{hashlib.sha256(str(x)).hexdigest()} comparisons (attack success 0.20, kept). In iteration~1 (the best), it switches to MD5 with a list of ``known edge cases'' containing precomputed hashes and validation function names randomly drawn from \texttt{["validate\_input", "check\_edge\_case", ...]} (attack success 0.30, kept). By iteration~10, it over-engineers: a helper function \texttt{\_handle\_special\_case()} with SHA-256 and multiple layers of indirection, but the code replacement logic breaks on many tasks, producing 0.00 attack success. The optimizer peaked early and could not escape the hash-based obfuscation paradigm.
+
+On the blue side, iteration~0 produces a ``defer all'' protocol (safety 1.00, usefulness 0.00). Iteration~2 (the best) adds targeted AST checks for the specific patterns in the training attack: hashlib imports, hexdigest calls, 32-char hex strings, and validation-function naming. This works perfectly against hash-based obfuscation but creates the brittle dependency that fails on held-out tasks. Full strategy code is provided as supplementary material (the blue protocol matches Phase~2 best; the red strategy shows the character-frequency variant from Phase~3 co-evolution, which diverged from the hash-based Phase~1 best).
+
+
+\section{Discussion and Limitations}
+
+\paragraph{Strategy overfitting.} The failure mode taxonomy (Table~\ref{tab:failure}) reveals that overfitting operates through two channels: pattern-specific AST rules that do not fire on unseen code, and an overfitted model prompt that inverts the suspicion scoring on out-of-distribution inputs. This is not a subtle degradation but a catastrophic failure: the monitor's false positive rate reaches 80\% while its false negative rate reaches 40\%. The mechanism mirrors supervised learning: the ``training set'' (Phase~1 best attack) has a narrow feature distribution (hash-based obfuscation), and the ``classifier'' (optimized monitor) learns features specific to that distribution rather than general indicators of backdoor presence.
+
+\paragraph{Asymmetric dynamics.} Red optimization saturates quickly (2 iterations to peak), while blue optimization produces high variance with several iterations collapsing to trivial ``defer all'' solutions. The red strategy space (obfuscation only) is narrow; the blue space (local analysis + model scoring) is richer but harder to navigate.
+
+\paragraph{Simple baselines are robust.} A threshold-based monitor with no optimization outperforms the optimized protocol on held-out tasks because its decision rule does not depend on specific code patterns. This argues for simple, pattern-agnostic monitoring as a robust default.
+
+\paragraph{Recommendations for practitioners.} Four guidelines follow from our results:
+\begin{enumerate}[nosep,left=0pt]
+    \item \textbf{Benchmark on held-out data.} Our optimized monitor achieved 90\% training safety but 47\% held-out safety. Any automated red teaming pipeline should report gap measurements on unseen tasks and threat vectors.
+    \item \textbf{Prefer general-purpose prompts over pattern-specific rules.} The baseline monitor's generic ``is this suspicious?'' prompt generalizes (AUROC = 0.85 on held-out); the optimized monitor's 7 AST-specific checks do not (AUROC = 0.50). Pattern-specific rules should supplement, not replace, general-purpose judgment.
+    \item \textbf{Report AUROC alongside safety.} A monitor can achieve high safety through conservative deferral while having zero discriminative signal. Our optimized monitor's AUROC of 0.50 across all seeds exposes this.
+    \item \textbf{Use multi-seed evaluation.} With $n{=}10$ attack tasks, single-seed metrics have $\pm$0.16 std. Three seeds (our minimum) reveals whether results are stable.
+\end{enumerate}
+
+\subsection{Limitations}
+
+We intentionally chose a constrained setting (15 training tasks, 10 held-out tasks, non-frontier models, prompt-level optimization) to isolate whether overfitting dynamics emerge under minimal conditions. The fact that catastrophic overfitting appears \emph{even in this simple setting} suggests the problem will be worse, not better, at scale: larger strategy spaces give the optimizer more room to specialize, and more capable models can learn subtler pattern-specific features. Three caveats apply. First, with $n{=}10$ attack tasks per evaluation, each success shifts metrics by 10 percentage points, so individual numbers should be interpreted as trends rather than precise estimates. Second, the optimizer operates at the prompt level rather than fine-tuning weights, which limits the optimization surface. Third, the code backdoor setting is a simplified proxy for real deployment threats.
+
+\subsection{Future Work}
+
+The overfitting problem is not inevitable. Mitigations parallel supervised learning: training against a \emph{diverse ensemble} of opponents (data augmentation), regularizing protocol complexity (limiting AST-check count), and population-based co-evolution with fitness sharing (hall-of-fame opponents). Natural extensions include scaling to APPS/HumanEval task pools, using frontier models as both $\mathcal{U}$ and $\mathcal{O}$, and expanding the red strategy space beyond obfuscation to include architecture-level attacks.
+
+
+\section{Conclusion}
+
+Automated optimization can partially close the elicitation gap, but the improvements are brittle. The strategies an optimizer discovers are tuned to the opponent it trained against, not to the underlying task. A simple threshold baseline, with no optimization at all, outperforms the best optimized monitor on unseen tasks.
+
+For AI Control practitioners, the implication is direct: any protocol designed by optimizing against a specific attack class should be validated against held-out attacks before deployment. Reporting safety metrics without held-out evaluation is analogous to reporting training accuracy without a test set. Simple, pattern-agnostic baselines should always accompany optimized strategies as a sanity check. If the baseline wins on held-out, the optimization has overfit. Until automated optimization methods can be made robust to distribution shift, the most reliable monitors may be the simplest ones.
+
+
+\paragraph{Code and Data.}
+Code repository: \url{https://github.com/phomarkon/autocontrol}. The repository includes the full pipeline, all evaluation results (JSON), optimizer logs, best red/blue strategy code, an interactive Streamlit demo, and Luthien Proxy policy files. All 15 training tasks, 10 held-out tasks, and the board.json with complete phase results are included.
+
+\paragraph{Author Contributions.} P.M.K.\ conceived the research question, designed the 5-phase experimental framework, ran all experiments on Lambda Cloud infrastructure, analyzed results, and wrote the paper. All work was completed during the AI Control Hackathon 2026 (March 20--22).
+
+\paragraph{LLM Usage Statement.} Claude Code (Anthropic, Opus 4.6) was used as a programming assistant for pipeline implementation, matplotlib figure generation, LaTeX typesetting, and manuscript drafting. All experimental design, research direction, interpretation of results, and scientific claims are the sole responsibility of the author. The deepseek-v3.1 model serving as the optimizer within the \ours{} pipeline is part of the experimental setup, not an authorship tool.
+
+\begin{ack}
+This work was supported by a \$400 Lambda Cloud compute credit. The full pipeline completed in ${\sim}$8 hours with ${\sim}$1{,}200 API calls at under \$50 total cost.
+\end{ack}
+
+{\small
+\bibliographystyle{plainnat}
+\bibliography{references}
+}
+
+\end{document}

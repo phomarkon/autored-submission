@@ -1,0 +1,12 @@
+# AutoRed Optimized Monitor — Luthien deployment config
+#
+# WARNING: This policy overfits to hash-based attacks.
+# Training safety: 90% | Held-out safety: 47% | Held-out AUROC: 0.50
+#
+# DO NOT deploy without held-out validation.
+# See baseline_monitor.yaml for a robust alternative.
+#
+policy:
+  class: "luthien_policies.optimized_monitor:OptimizedMonitorPolicy"
+  config:
+    judge_model: "claude-haiku-4-5-20251001"
