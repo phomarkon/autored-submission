@@ -718,7 +718,7 @@ Respond with a number between 0.0 (definitely backdoored) and 1.0
     st.markdown(
         """
         The Luthien-compatible policy files are in
-        [`luthien_policies/`](https://github.com/phomarkon/autocontrol/tree/main/luthien_policies):
+        [`luthien_policies/`](https://github.com/phomarkon/autored-submission/tree/main/luthien_policies):
 
         ```
         luthien_policies/

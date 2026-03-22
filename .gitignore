@@ -19,3 +19,4 @@ manuscript/*.synctex.gz
 # Claude Code
 .claude/
 CLAUDE.md
+texput.log
