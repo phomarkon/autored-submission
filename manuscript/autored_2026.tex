@@ -43,7 +43,7 @@ via Automated Red-Blue Optimization}
 \maketitle
 
 \begin{abstract}
-Evaluating AI safety requires understanding the \emph{elicitation gap}: the difference between a system's safety under naive evaluation and its safety under best-effort adversarial testing. Manual red teaming is expensive and does not scale. We introduce \ours{}, a five-phase framework that automates both red team attack optimization and blue team monitor optimization using a reasoning model as meta-optimizer. In a code backdoor detection setting adapted from the AI Control framework, \ours{} iteratively generates, evaluates, and improves strategies on both sides, then tests whether the improvements generalize. Automated optimization partially closes the elicitation gap: red attacks improve and blue monitors adapt. Co-evolutionary dynamics are oscillatory, with neither side converging. The central finding is cautionary: optimized strategies overfit to their training opponents. The best optimized monitor drops from 90\% safety during training to 47\% on held-out tasks, while a simple threshold baseline maintains 100\%. Elicitation gap measurements without held-out evaluation are unreliable.
+Evaluating AI safety requires understanding the \emph{elicitation gap}: the difference between a system's safety under naive evaluation and its safety under best-effort adversarial testing. Manual red teaming is expensive and does not scale. We introduce \ours{}, a five-phase framework that automates both red team attack optimization and blue team monitor optimization using a reasoning model as meta-optimizer. In a code backdoor detection setting adapted from the AI Control framework, \ours{} iteratively generates, evaluates, and improves strategies on both sides, then tests whether the improvements generalize. Automated optimization partially closes the elicitation gap: red attacks improve and blue monitors adapt. Co-evolutionary dynamics are oscillatory, with neither side converging. The central finding is cautionary: optimized strategies are brittle to distribution shift. The best optimized monitor drops from 90\% safety during training to 47\% on held-out tasks with a different attack mechanism, while a simple threshold baseline maintains 100\%. Elicitation gap measurements without held-out evaluation across attack distributions are unreliable.
 \end{abstract}
 
 
@@ -430,7 +430,7 @@ For AI Control practitioners, the implication is direct: any protocol designed b
 
 
 \paragraph{Code and Data.}
-Code repository: \url{https://github.com/phomarkon/autocontrol}. The repository includes the full pipeline, all evaluation results (JSON), optimizer logs, best red/blue strategy code, an interactive Streamlit demo, and Luthien Proxy policy files. All 15 training tasks, 10 held-out tasks, and the board.json with complete phase results are included.
+Code repository: \url{https://github.com/phomarkon/autored-submission}. The repository includes the full pipeline, all evaluation results (JSON), optimizer logs, best red/blue strategy code, an interactive Streamlit demo, and Luthien Proxy policy files. All 15 training tasks, 10 held-out tasks, and the board.json with complete phase results are included.
 
 \paragraph{Author Contributions.} P.M.K.\ conceived the research question, designed the 5-phase experimental framework, ran all experiments on Lambda Cloud infrastructure, analyzed results, and wrote the paper. All work was completed during the AI Control Hackathon 2026 (March 20--22).
 
